@@ -110,9 +110,12 @@ telegram:
 postgres:
   url: "postgres://job_notifier:password@127.0.0.1:5432/job_notifier"
 
+redis:
+  url: "redis://127.0.0.1:6379"
+
 keywords:
-  track_rust: true
-  track_go: true
+  track_rust: false
+  track_go: false
 
 scraping:
   interval_seconds: 600
