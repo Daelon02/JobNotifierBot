@@ -1,0 +1,50 @@
+version: '3.8'
+
+services:
+  redis:
+    image: redis:alpine
+    container_name: job_notifier_redis
+    command: redis-server --appendonly yes
+    ports:
+      - "127.0.0.1:6379:6379"
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:15-alpine
+    container_name: job_notifier_postgres
+    environment:
+      - POSTGRES_USER=job_notifier
+      - POSTGRES_PASSWORD=password
+      - POSTGRES_DB=job_notifier
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U job_notifier -d job_notifier"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  bot:
+    build: .
+    container_name: job_notifier_bot
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    environment:
+      - DATABASE_URL=postgres://job_notifier:password@postgres:5432/job_notifier
+      - REDIS_URL=redis://redis:6379
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro
+      - ./storage:/app/storage
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  redis_data:
