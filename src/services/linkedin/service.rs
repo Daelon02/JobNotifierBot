@@ -46,12 +46,12 @@ impl LinkedInClient {
 
     pub async fn fetch_vacancies(&self, keyword: Keyword) -> AppResult<Vec<LinkedInVacancy>> {
         let keyword_query = match keyword {
-            Keyword::Rust => "Rust developer",
-            Keyword::Go => "Golang developer",
+            Keyword::Rust => "Rust",
+            Keyword::Go => "Golang",
         };
 
         let url = format!(
-            "{}?keywords={}&location=Ukraine&f_TPR=r86400&position=1&pageNum=0",
+            "{}?keywords={}&sortBy=DD&start=0",
             LINKEDIN_JOBS_API,
             urlencoding::encode(keyword_query)
         );
