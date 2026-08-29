@@ -1,7 +1,7 @@
 use super::models::{Command, MyDialogue, State};
 use crate::services::djinni::service::html_escape;
 use crate::services::email::service::EmailService;
-use crate::services::storage::models::Keyword;
+use crate::services::storage::models::{Keyword, VacancyDb};
 use crate::services::storage::service::Db;
 use log::info;
 use std::path::Path;
@@ -382,30 +382,38 @@ async fn handle_help_command(
     Ok(())
 }
 
-async fn handle_vacancies_command(
-    bot: Bot,
-    msg: Message,
-    _dialogue: MyDialogue,
-    db: Db,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let vacancies = db.get_recent_vacancies(None, 15).await?;
+const VACANCIES_PAGE_SIZE: i64 = 10;
 
-    if vacancies.is_empty() {
-        bot.send_message(
-            msg.chat.id,
-            "📁 <b>Збережених вакансій у базі поки немає.</b>\n\n\
-             Увімкніть пошук у меню «⚙️ Фільтри мов», і бот одразу знайде та збереже актуальні вакансії з Djinni, DOU та LinkedIn.",
+fn build_vacancies_view(
+    vacancies: &[VacancyDb],
+    total_count: i64,
+    filter_key: &str,
+    page: i64,
+) -> (String, InlineKeyboardMarkup) {
+    let total_pages = ((total_count + VACANCIES_PAGE_SIZE - 1) / VACANCIES_PAGE_SIZE).max(1);
+    let current_page = page.clamp(1, total_pages);
+
+    let filter_title = match filter_key {
+        "rust" => "🦀 Rust",
+        "go" => "🐹 Go",
+        _ => "🔥 Всі",
+    };
+
+    let mut text = if vacancies.is_empty() {
+        format!(
+            "📁 <b>Збережених вакансій за фільтром «{}» не знайдено.</b>\n\n\
+             Увімкніть пошук у меню «⚙️ Фільтри мов», щоб бот автоматично знаходив вакансії.",
+            filter_title
         )
-        .parse_mode(teloxide::types::ParseMode::Html)
-        .await?;
-        return Ok(());
-    }
+    } else {
+        format!(
+            "📁 <b>Збережені вакансії — {}</b>\n\
+             📄 Сторінка <b>{}</b> з <b>{}</b> (всього знайдено: <b>{}</b>):\n\n",
+            filter_title, current_page, total_pages, total_count
+        )
+    };
 
-    let mut text = format!(
-        "📁 <b>Збережені вакансії (останні {}):</b>\n\n",
-        vacancies.len()
-    );
-
+    let start_idx = (current_page - 1) * VACANCIES_PAGE_SIZE;
     for (i, vac) in vacancies.iter().enumerate() {
         let tag = match vac.keyword.as_str() {
             "Rust" => "🦀 Rust",
@@ -425,7 +433,7 @@ async fn handle_vacancies_command(
             "{}. [<b>{}</b>] <b>{}</b>\n\
              🏢 {} ({}{})\n\
              🕒 <i>{}</i> ➡️ <a href=\"{}\">Переглянути вакансію</a>\n\n",
-            i + 1,
+            start_idx + i as i64 + 1,
             html_escape(&vac.platform.to_uppercase()),
             html_escape(&vac.title),
             html_escape(&vac.company),
@@ -436,11 +444,77 @@ async fn handle_vacancies_command(
         ));
     }
 
-    let keyboard = InlineKeyboardMarkup::new(vec![vec![
-        InlineKeyboardButton::callback("🔥 Всі", "vac_filter:all"),
-        InlineKeyboardButton::callback("🦀 Тільки Rust", "vac_filter:rust"),
-        InlineKeyboardButton::callback("🐹 Тільки Go", "vac_filter:go"),
-    ]]);
+    let mut rows = Vec::new();
+
+    // Row 1: Filter switches (reset to page 1)
+    let filter_row = vec![
+        InlineKeyboardButton::callback(
+            if filter_key == "all" {
+                "🔘 🔥 Всі"
+            } else {
+                "🔥 Всі"
+            },
+            "vac_p:all:1",
+        ),
+        InlineKeyboardButton::callback(
+            if filter_key == "rust" {
+                "🔘 🦀 Rust"
+            } else {
+                "🦀 Rust"
+            },
+            "vac_p:rust:1",
+        ),
+        InlineKeyboardButton::callback(
+            if filter_key == "go" {
+                "🔘 🐹 Go"
+            } else {
+                "🐹 Go"
+            },
+            "vac_p:go:1",
+        ),
+    ];
+    rows.push(filter_row);
+
+    // Row 2: Pagination navigation controls
+    if total_pages > 1 {
+        let mut nav_row = Vec::new();
+
+        if current_page > 1 {
+            nav_row.push(InlineKeyboardButton::callback(
+                "◀️ Назад",
+                format!("vac_p:{}:{}", filter_key, current_page - 1),
+            ));
+        }
+
+        nav_row.push(InlineKeyboardButton::callback(
+            format!("📄 {}/{}", current_page, total_pages),
+            "noop",
+        ));
+
+        if current_page < total_pages {
+            nav_row.push(InlineKeyboardButton::callback(
+                "Вперед ▶️",
+                format!("vac_p:{}:{}", filter_key, current_page + 1),
+            ));
+        }
+
+        rows.push(nav_row);
+    }
+
+    (text, InlineKeyboardMarkup::new(rows))
+}
+
+async fn handle_vacancies_command(
+    bot: Bot,
+    msg: Message,
+    _dialogue: MyDialogue,
+    db: Db,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let (vacancies, total_count) = db
+        .get_vacancies_paginated(None, 1, VACANCIES_PAGE_SIZE)
+        .await?;
+
+    let (text, keyboard) = build_vacancies_view(&vacancies, total_count, "all", 1);
 
     let link_preview = LinkPreviewOptions {
         is_disabled: true,
@@ -820,63 +894,37 @@ async fn handle_callback_query(
         return Ok(());
     }
 
-    if let Some(filter_type) = data.strip_prefix("vac_filter:") {
-        let (kw_filter, title_str) = match filter_type {
-            "rust" => (Some(Keyword::Rust), "Rust"),
-            "go" => (Some(Keyword::Go), "Go"),
-            _ => (None, "всі мови"),
-        };
+    if data == "noop" {
+        bot.answer_callback_query(q.id).await?;
+        return Ok(());
+    }
 
-        let vacancies = db.get_recent_vacancies(kw_filter, 15).await?;
-
-        let mut text = if vacancies.is_empty() {
-            format!(
-                "📁 <b>Збережених вакансій за фільтром «{}» не знайдено.</b>",
-                title_str
-            )
+    if data.starts_with("vac_p:") || data.starts_with("vac_filter:") {
+        let (filter_key, page) = if let Some(p_data) = data.strip_prefix("vac_p:") {
+            let mut parts = p_data.split(':');
+            let f = parts.next().unwrap_or("all");
+            let p = parts
+                .next()
+                .and_then(|s| s.parse::<i64>().ok())
+                .unwrap_or(1);
+            (f, p)
+        } else if let Some(f_data) = data.strip_prefix("vac_filter:") {
+            (f_data, 1)
         } else {
-            format!(
-                "📁 <b>Збережені вакансії ({} — останні {}):</b>\n\n",
-                title_str,
-                vacancies.len()
-            )
+            ("all", 1)
         };
 
-        for (i, vac) in vacancies.iter().enumerate() {
-            let tag = match vac.keyword.as_str() {
-                "Rust" => "🦀 Rust",
-                "Go" => "🐹 Go",
-                _ => vac.keyword.as_str(),
-            };
+        let kw_filter = match filter_key {
+            "rust" => Some(Keyword::Rust),
+            "go" => Some(Keyword::Go),
+            _ => None,
+        };
 
-            let salary_part = vac
-                .salary
-                .as_ref()
-                .map(|s| format!(" | 💰 {}", html_escape(s)))
-                .unwrap_or_default();
+        let (vacancies, total_count) = db
+            .get_vacancies_paginated(kw_filter, page, VACANCIES_PAGE_SIZE)
+            .await?;
 
-            let date_str = vac.discovered_at.format("%d.%m %H:%M").to_string();
-
-            text.push_str(&format!(
-                "{}. [<b>{}</b>] <b>{}</b>\n\
-                 🏢 {} ({}{})\n\
-                 🕒 <i>{}</i> ➡️ <a href=\"{}\">Переглянути вакансію</a>\n\n",
-                i + 1,
-                html_escape(&vac.platform.to_uppercase()),
-                html_escape(&vac.title),
-                html_escape(&vac.company),
-                tag,
-                salary_part,
-                date_str,
-                vac.url
-            ));
-        }
-
-        let keyboard = InlineKeyboardMarkup::new(vec![vec![
-            InlineKeyboardButton::callback("🔥 Всі", "vac_filter:all"),
-            InlineKeyboardButton::callback("🦀 Тільки Rust", "vac_filter:rust"),
-            InlineKeyboardButton::callback("🐹 Тільки Go", "vac_filter:go"),
-        ]]);
+        let (text, keyboard) = build_vacancies_view(&vacancies, total_count, filter_key, page);
 
         let link_preview = LinkPreviewOptions {
             is_disabled: true,
@@ -887,11 +935,12 @@ async fn handle_callback_query(
         };
 
         if let Some(msg) = q.message {
-            bot.edit_message_text(msg.chat().id, msg.id(), text)
+            let _ = bot
+                .edit_message_text(msg.chat().id, msg.id(), text)
                 .parse_mode(teloxide::types::ParseMode::Html)
                 .link_preview_options(link_preview)
                 .reply_markup(keyboard)
-                .await?;
+                .await;
         }
 
         bot.answer_callback_query(q.id).await?;

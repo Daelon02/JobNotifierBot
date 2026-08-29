@@ -144,13 +144,14 @@ Ensure your `config.yaml` has your Telegram Bot Token and valid parameters.
 
 ### 2. Start Full Stack
 ```bash
-docker-compose up -d --build
+docker compose pull
+docker compose up -d
 ```
-The bot will automatically build, run database migrations, connect to PostgreSQL, and start scraping and monitoring tasks.
+The stack will pull `daelon02/job_notifier_bot:latest`, start Redis, initialize PostgreSQL, run migrations, and launch all background scrapers.
 
 ### 3. View Logs
 ```bash
-docker-compose logs -f bot
+docker compose logs -f bot
 ```
 
 ---

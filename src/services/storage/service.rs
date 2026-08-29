@@ -89,6 +89,17 @@ impl Db {
         self.postgres.get_recent_vacancies(keyword, limit).await
     }
 
+    pub async fn get_vacancies_paginated(
+        &self,
+        keyword: Option<Keyword>,
+        page: i64,
+        page_size: i64,
+    ) -> AppResult<(Vec<VacancyDb>, i64)> {
+        self.postgres
+            .get_vacancies_paginated(keyword, page, page_size)
+            .await
+    }
+
     pub async fn add_application(
         &self,
         user_id: i64,

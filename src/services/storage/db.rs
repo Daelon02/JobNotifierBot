@@ -193,6 +193,34 @@ impl PostgresDb {
         Ok(list)
     }
 
+    pub async fn get_vacancies_paginated(
+        &self,
+        keyword: Option<Keyword>,
+        page: i64,
+        page_size: i64,
+    ) -> AppResult<(Vec<VacancyDb>, i64)> {
+        let mut conn = self.pool.get().await?;
+        let page_num = page.max(1);
+        let offset = (page_num - 1) * page_size;
+
+        let mut count_query = vacancies::table.into_boxed();
+        let mut list_query = vacancies::table
+            .into_boxed()
+            .order(vacancies::discovered_at.desc())
+            .offset(offset)
+            .limit(page_size);
+
+        if let Some(kw) = keyword {
+            count_query = count_query.filter(vacancies::keyword.eq(kw.as_str()));
+            list_query = list_query.filter(vacancies::keyword.eq(kw.as_str()));
+        }
+
+        let total_count: i64 = count_query.count().get_result(&mut conn).await?;
+        let list: Vec<VacancyDb> = list_query.load(&mut conn).await?;
+
+        Ok((list, total_count))
+    }
+
     pub async fn add_application(
         &self,
         user_id: i64,
