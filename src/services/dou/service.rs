@@ -147,7 +147,7 @@ pub async fn run_dou_polling(
     bot: Bot,
     interval_seconds: u64,
 ) -> AppResult<()> {
-    let mut interval = tokio::time::interval(Duration::from_secs(interval_seconds));
+    let mut interval = tokio::time::interval(Duration::from_secs(interval_seconds.max(1)));
 
     loop {
         interval.tick().await;

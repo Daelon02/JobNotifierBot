@@ -3,3 +3,4 @@ config.yaml
 storage/resumes/*
 !storage/resumes/.gitkeep
 .DS_Store
+.vscode

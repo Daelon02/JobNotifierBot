@@ -1,4 +1,4 @@
-use job_notifier_bot::services::djinni::service::DjinniClient;
+use job_notifier_bot::services::djinni::service::{DjinniClient, truncate_str};
 use job_notifier_bot::services::dou::service::DouClient;
 use job_notifier_bot::services::linkedin::service::LinkedInClient;
 use job_notifier_bot::services::storage::models::Keyword;
@@ -122,17 +122,53 @@ fn test_linkedin_parser_sample_html() {
         </h4>
         <span class="job-search-card__location">Kyiv, Ukraine (Remote)</span>
     </li>
+    <li class="job-search-card">
+        <a class="base-card__full-link" href="https://www.linkedin.com/jobs/view/9988776655?refId=xyz">
+            <h3 class="base-search-card__title">Senior Rust Engineer</h3>
+        </a>
+        <h4 class="base-search-card__subtitle">
+            <a href="https://www.linkedin.com/company/uscorp">US Corp</a>
+        </h4>
+        <span class="job-search-card__location">New York, NY</span>
+    </li>
+    <li class="job-search-card">
+        <a class="base-card__full-link" href="https://www.linkedin.com/jobs/view/5544332211?refId=def">
+            <h3 class="base-search-card__title">Rust Backend Developer</h3>
+        </a>
+        <h4 class="base-search-card__subtitle">
+            <a href="https://www.linkedin.com/company/eucorp">EU Corp</a>
+        </h4>
+        <span class="job-search-card__location">Warsaw, Mazowieckie, Poland</span>
+    </li>
     "#;
 
     let client = LinkedInClient::new();
     let vacancies = client.parse_html(html, Keyword::Rust).expect("Parse error");
 
-    assert_eq!(vacancies.len(), 1);
-    let vac = &vacancies[0];
-    assert_eq!(vac.title, "Software Engineer (Rust/Go)");
-    assert_eq!(vac.company, "Acme Corp");
-    assert_eq!(vac.stack.as_deref(), Some("Kyiv, Ukraine (Remote)"));
-    assert_eq!(vac.url, "https://www.linkedin.com/jobs/view/1122334455");
+    assert_eq!(vacancies.len(), 2);
+    assert_eq!(vacancies[0].title, "Software Engineer (Rust/Go)");
+    assert_eq!(vacancies[0].company, "Acme Corp");
+    assert_eq!(
+        vacancies[0].stack.as_deref(),
+        Some("Kyiv, Ukraine (Remote)")
+    );
+    assert_eq!(
+        vacancies[0].url,
+        "https://www.linkedin.com/jobs/view/1122334455"
+    );
+
+    assert_eq!(vacancies[1].title, "Rust Backend Developer");
+    assert_eq!(
+        vacancies[1].stack.as_deref(),
+        Some("Warsaw, Mazowieckie, Poland")
+    );
+}
+
+#[test]
+fn test_truncate_str_utf8_byte_limit() {
+    let cyrillic = "ТОВ Українська Розробницька Компанія Індастріал";
+    let truncated = truncate_str(cyrillic, 40);
+    assert!(truncated.len() <= 40);
 }
 
 #[test]

@@ -77,18 +77,6 @@ impl Db {
         self.postgres.save_vacancy(vacancy).await
     }
 
-    pub async fn get_vacancy(&self, vacancy_id: &str) -> AppResult<Option<VacancyDb>> {
-        self.postgres.get_vacancy(vacancy_id).await
-    }
-
-    pub async fn get_recent_vacancies(
-        &self,
-        keyword: Option<Keyword>,
-        limit: i64,
-    ) -> AppResult<Vec<VacancyDb>> {
-        self.postgres.get_recent_vacancies(keyword, limit).await
-    }
-
     pub async fn get_vacancies_paginated(
         &self,
         keyword: Option<Keyword>,

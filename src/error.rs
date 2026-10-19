@@ -10,17 +10,11 @@ pub enum AppError {
     #[error("YAML serialization/deserialization error: {0}")]
     Yaml(#[from] serde_yaml::Error),
 
-    #[error("JSON serialization/deserialization error: {0}")]
-    Json(#[from] serde_json::Error),
-
     #[error("HTTP request error: {0}")]
     Http(#[from] reqwest::Error),
 
     #[error("Telegram API error: {0}")]
     Telegram(#[from] teloxide::RequestError),
-
-    #[error("Redis error: {0}")]
-    Redis(#[from] redis::RedisError),
 
     #[error("Database error: {0}")]
     Database(#[from] diesel::result::Error),
@@ -45,10 +39,6 @@ pub enum AppError {
 
     #[error("Lettre email building error: {0}")]
     LettreEmail(#[from] lettre::error::Error),
-
-    #[allow(dead_code)]
-    #[error("Configuration error: {0}")]
-    Config(String),
 
     #[error("Storage error: {0}")]
     Storage(#[from] Box<dyn std::error::Error + Send + Sync>),

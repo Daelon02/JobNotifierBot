@@ -1,6 +1,6 @@
 use super::models::JobEmailNotification;
 use crate::error::{AppError, AppResult};
-use crate::services::djinni::service::html_escape;
+use crate::services::djinni::service::{html_escape, truncate_str};
 use crate::services::storage::models::UserDb;
 use crate::services::storage::service::Db;
 use lettre::message::header::ContentType;
@@ -40,6 +40,7 @@ impl EmailService {
             .smtp_host
             .as_deref()
             .ok_or_else(|| AppError::Email("SMTP host not configured".to_string()))?;
+        let smtp_port = user.smtp_port.unwrap_or(465) as u16;
         let user_email = user
             .email_address
             .as_deref()
@@ -65,10 +66,17 @@ impl EmailService {
 
         let creds = Credentials::new(imap_user.to_string(), password.to_string());
 
-        let mailer: AsyncSmtpTransport<Tokio1Executor> =
-            AsyncSmtpTransport::<Tokio1Executor>::relay(smtp_host)?
+        let mailer: AsyncSmtpTransport<Tokio1Executor> = if smtp_port == 587 {
+            AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(smtp_host)?
+                .port(smtp_port)
                 .credentials(creds)
-                .build();
+                .build()
+        } else {
+            AsyncSmtpTransport::<Tokio1Executor>::relay(smtp_host)?
+                .port(smtp_port)
+                .credentials(creds)
+                .build()
+        };
 
         mailer.send(email).await?;
         info!("Email reply sent successfully to {}", to_address);
@@ -125,9 +133,10 @@ impl EmailService {
                 uid_vec.sort_unstable_by(|a, b| b.cmp(a));
 
                 let mut results = Vec::new();
+                let mut matched_seq_ids = Vec::new();
 
                 for uid in uid_vec.iter().take(10) {
-                    let messages = match session.fetch(uid.to_string(), "RFC822") {
+                    let messages = match session.fetch(uid.to_string(), "BODY.PEEK[]") {
                         Ok(m) => m,
                         Err(_) => continue,
                     };
@@ -160,6 +169,7 @@ impl EmailService {
                                     .map(|d| d.to_rfc3339())
                                     .unwrap_or_else(|| "Recent".to_string());
 
+                                matched_seq_ids.push(*uid);
                                 results.push(JobEmailNotification {
                                     message_id: uid.to_string(),
                                     from,
@@ -170,6 +180,10 @@ impl EmailService {
                             }
                         }
                     }
+                }
+
+                for seq_id in matched_seq_ids {
+                    let _ = session.store(seq_id.to_string(), "+FLAGS (\\Seen)");
                 }
 
                 let _ = session.logout();
@@ -183,7 +197,7 @@ impl EmailService {
 }
 
 pub async fn run_email_polling(db: Db, bot: Bot, interval_seconds: u64) -> AppResult<()> {
-    let mut interval = tokio::time::interval(Duration::from_secs(interval_seconds));
+    let mut interval = tokio::time::interval(Duration::from_secs(interval_seconds.max(1)));
 
     loop {
         interval.tick().await;
@@ -204,7 +218,13 @@ pub async fn run_email_polling(db: Db, bot: Bot, interval_seconds: u64) -> AppRe
             match EmailService::check_inbox(&user).await {
                 Ok(notifications) => {
                     for notif in notifications {
-                        notify_user_email_offer(&bot, user.telegram_id, &notif).await;
+                        notify_user_email_offer(
+                            &bot,
+                            user.telegram_id,
+                            user.imap_host.as_deref(),
+                            &notif,
+                        )
+                        .await;
                     }
                 }
                 Err(e) => {
@@ -218,7 +238,12 @@ pub async fn run_email_polling(db: Db, bot: Bot, interval_seconds: u64) -> AppRe
     }
 }
 
-async fn notify_user_email_offer(bot: &Bot, telegram_id: i64, notif: &JobEmailNotification) {
+async fn notify_user_email_offer(
+    bot: &Bot,
+    telegram_id: i64,
+    imap_host: Option<&str>,
+    notif: &JobEmailNotification,
+) {
     let text = format!(
         "📬 <b>Нове повідомлення по роботі / Офер на пошті!</b>\n\n\
          👤 <b>Від кого:</b> <code>{}</code>\n\
@@ -232,12 +257,15 @@ async fn notify_user_email_offer(bot: &Bot, telegram_id: i64, notif: &JobEmailNo
         html_escape(&notif.snippet)
     );
 
-    let reply_cb = format!("reply_email:{}", notif.from);
+    let reply_cb = format!("reply_email:{}", truncate_str(&notif.from, 50));
 
-    let webmail_url = if notif.from.contains("gmail") {
-        "https://mail.google.com"
+    let host_lower = imap_host.unwrap_or_default().to_lowercase();
+    let webmail_url = if host_lower.contains("ukr.net") {
+        "https://mail.ukr.net"
+    } else if host_lower.contains("outlook") || host_lower.contains("office365") {
+        "https://outlook.live.com"
     } else {
-        "https://webmail.com"
+        "https://mail.google.com"
     };
 
     let fallback_url = match reqwest::Url::parse("https://mail.google.com") {

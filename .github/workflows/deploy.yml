@@ -1,0 +1,75 @@
+name: Deploy
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Image tag to build and deploy (e.g. v0.1.0)"
+        required: true
+        default: "latest"
+
+env:
+  IMAGE_NAME: daelon02/job_notifier_bot
+
+jobs:
+  validate:
+    uses: ./.github/workflows/validate.yml
+
+  build_and_deploy:
+    needs: validate
+    name: Build Docker image & deploy via SSH
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Determine tag
+        id: meta
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "tag=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME || 'daelon02' }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.tag }}
+            ${{ env.IMAGE_NAME }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Deploy on server via SSH
+        uses: appleboy/ssh-action@v1.2.0
+        env:
+          TAG: ${{ steps.meta.outputs.tag }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          port: ${{ secrets.SSH_PORT || 22 }}
+          envs: TAG,DEPLOY_PATH
+          script: |
+            set -e
+            cd "$DEPLOY_PATH"
+            sed -i "s|image: daelon02/job_notifier_bot:.*|image: daelon02/job_notifier_bot:${TAG}|" docker-compose.yaml
+            docker compose pull bot
+            docker compose up -d bot
+            docker image prune -f
+

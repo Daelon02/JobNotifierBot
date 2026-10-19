@@ -164,35 +164,6 @@ impl PostgresDb {
         Ok(rows_affected > 0)
     }
 
-    pub async fn get_vacancy(&self, vacancy_id: &str) -> AppResult<Option<VacancyDb>> {
-        let mut conn = self.pool.get().await?;
-        let v = vacancies::table
-            .filter(vacancies::id.eq(vacancy_id))
-            .first(&mut conn)
-            .await
-            .optional()?;
-        Ok(v)
-    }
-
-    pub async fn get_recent_vacancies(
-        &self,
-        keyword: Option<Keyword>,
-        limit: i64,
-    ) -> AppResult<Vec<VacancyDb>> {
-        let mut conn = self.pool.get().await?;
-        let mut query = vacancies::table
-            .into_boxed()
-            .order(vacancies::discovered_at.desc())
-            .limit(limit);
-
-        if let Some(kw) = keyword {
-            query = query.filter(vacancies::keyword.eq(kw.as_str()));
-        }
-
-        let list = query.load(&mut conn).await?;
-        Ok(list)
-    }
-
     pub async fn get_vacancies_paginated(
         &self,
         keyword: Option<Keyword>,
@@ -306,14 +277,15 @@ impl PostgresDb {
         user_id: i64,
         company_name: &str,
     ) -> AppResult<bool> {
-        let mut conn = self.pool.get().await?;
-        let count: i64 = blacklist::table
-            .filter(blacklist::user_id.eq(user_id))
-            .filter(blacklist::company_name.ilike(company_name.trim()))
-            .count()
-            .get_result(&mut conn)
-            .await?;
+        let target = company_name.trim().to_lowercase();
+        if target.is_empty() {
+            return Ok(false);
+        }
 
-        Ok(count > 0)
+        let items = self.get_user_blacklist(user_id).await?;
+        Ok(items.iter().any(|item| {
+            let bl = item.company_name.trim().to_lowercase();
+            !bl.is_empty() && (target.contains(&bl) || bl.contains(&target))
+        }))
     }
 }

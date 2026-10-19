@@ -7,6 +7,7 @@ use log::{error, info, warn};
 use reqwest::header::{ACCEPT, ACCEPT_LANGUAGE, HeaderMap, HeaderValue, USER_AGENT};
 use scraper::{Html, Selector};
 use sha2::{Digest, Sha256};
+use std::collections::HashSet;
 use std::time::Duration;
 use teloxide::prelude::*;
 use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup};
@@ -14,6 +15,67 @@ use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup};
 const LINKEDIN_JOBS_API: &str =
     "https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search";
 const DEFAULT_USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
+
+// LinkedIn canonical geoIds: Ukraine (102264497), Europe (100506914)
+const LINKEDIN_LOCATIONS: &[(&str, &str)] = &[("Ukraine", "102264497"), ("Europe", "100506914")];
+
+const US_STATE_CODES: &[&str] = &[
+    "AL", "AK", "AZ", "AR", "CA", "CO", "CT", "DE", "FL", "GA", "HI", "ID", "IL", "IN", "IA", "KS",
+    "KY", "LA", "ME", "MD", "MA", "MI", "MN", "MS", "MO", "MT", "NE", "NV", "NH", "NJ", "NM", "NY",
+    "NC", "ND", "OH", "OK", "OR", "PA", "RI", "SC", "SD", "TN", "TX", "UT", "VT", "VA", "WA", "WV",
+    "WI", "WY", "DC",
+];
+
+const NON_EUROPE_KEYWORDS: &[&str] = &[
+    "united states",
+    "usa",
+    "u.s.",
+    "canada",
+    "brazil",
+    "mexico",
+    "argentina",
+    "colombia",
+    "chile",
+    "latin america",
+    "north america",
+    "americas",
+    "india",
+    "australia",
+    "singapore",
+    "japan",
+    "china",
+    "bay area",
+    "silicon valley",
+    "greater new york",
+    "greater chicago",
+    "greater boston",
+    "greater seattle",
+    "greater los angeles",
+    "dallas-fort worth",
+    "washington dc-baltimore",
+];
+
+pub fn is_europe_or_ukraine_location(location: Option<&str>) -> bool {
+    let loc = match location.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(l) => l,
+        None => return false,
+    };
+
+    let lower = loc.to_lowercase();
+    if NON_EUROPE_KEYWORDS.iter().any(|kw| lower.contains(kw)) {
+        return false;
+    }
+
+    // LinkedIn formats US city locations as "City, ST" (e.g. "New York, NY", "Santa Clara, CA")
+    let base_loc = loc.split('(').next().unwrap_or(loc).trim();
+    if let Some((_, state_part)) = base_loc.rsplit_once(", ")
+        && US_STATE_CODES.contains(&state_part.trim())
+    {
+        return false;
+    }
+
+    true
+}
 
 #[derive(Clone)]
 pub struct LinkedInClient {
@@ -50,14 +112,40 @@ impl LinkedInClient {
             Keyword::Go => "Golang",
         };
 
-        let url = format!(
-            "{}?keywords={}&sortBy=DD&start=0",
-            LINKEDIN_JOBS_API,
-            urlencoding::encode(keyword_query)
-        );
+        let mut all_vacancies = Vec::new();
+        let mut seen_ids = HashSet::new();
 
-        let resp = self.client.get(&url).send().await?.text().await?;
-        self.parse_html(&resp, keyword)
+        for (location_name, geo_id) in LINKEDIN_LOCATIONS {
+            let url = format!(
+                "{}?keywords={}&location={}&geoId={}&sortBy=DD&start=0",
+                LINKEDIN_JOBS_API,
+                urlencoding::encode(keyword_query),
+                urlencoding::encode(location_name),
+                geo_id
+            );
+
+            match self.client.get(&url).send().await {
+                Ok(resp) => match resp.text().await {
+                    Ok(body) => {
+                        for vac in self.parse_html(&body, keyword)? {
+                            if seen_ids.insert(vac.id.clone()) {
+                                all_vacancies.push(vac);
+                            }
+                        }
+                    }
+                    Err(e) => warn!(
+                        "LinkedIn response read error for {} ({}): {:?}",
+                        keyword_query, location_name, e
+                    ),
+                },
+                Err(e) => warn!(
+                    "LinkedIn request error for {} ({}): {:?}",
+                    keyword_query, location_name, e
+                ),
+            }
+        }
+
+        Ok(all_vacancies)
     }
 
     pub fn parse_html(
@@ -115,6 +203,10 @@ impl LinkedInClient {
                 .map(|el| el.text().collect::<Vec<_>>().join(" ").trim().to_string())
                 .filter(|s| !s.is_empty());
 
+            if !is_europe_or_ukraine_location(location.as_deref()) {
+                continue;
+            }
+
             // Strictly filter out vacancies that do not contain the target keyword
             if !keyword.is_match(&title, location.as_deref(), "") {
                 continue;
@@ -157,7 +249,7 @@ pub async fn run_linkedin_polling(
     bot: Bot,
     interval_seconds: u64,
 ) -> AppResult<()> {
-    let mut interval = tokio::time::interval(Duration::from_secs(interval_seconds));
+    let mut interval = tokio::time::interval(Duration::from_secs(interval_seconds.max(1)));
 
     loop {
         interval.tick().await;

@@ -171,7 +171,7 @@ pub async fn run_djinni_polling(
     bot: Bot,
     interval_seconds: u64,
 ) -> AppResult<()> {
-    let mut interval = tokio::time::interval(Duration::from_secs(interval_seconds));
+    let mut interval = tokio::time::interval(Duration::from_secs(interval_seconds.max(1)));
 
     loop {
         interval.tick().await;
@@ -325,9 +325,13 @@ pub fn html_escape(input: &str) -> String {
         .replace('"', "&quot;")
 }
 
-pub fn truncate_str(s: &str, max_chars: usize) -> &str {
-    match s.char_indices().nth(max_chars) {
-        None => s,
-        Some((idx, _)) => &s[..idx],
+pub fn truncate_str(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
     }
+    let mut idx = max_bytes;
+    while idx > 0 && !s.is_char_boundary(idx) {
+        idx -= 1;
+    }
+    &s[..idx]
 }

@@ -1,5 +1,5 @@
 use super::models::{Command, MyDialogue, State};
-use crate::services::djinni::service::html_escape;
+use crate::services::djinni::service::{html_escape, truncate_str};
 use crate::services::email::service::EmailService;
 use crate::services::storage::models::{Keyword, VacancyDb};
 use crate::services::storage::service::Db;
@@ -18,6 +18,21 @@ use tokio::fs::File;
 
 const RESUMES_STORAGE_DIR: &str = "./storage/resumes";
 
+fn is_menu_button(msg: Message) -> bool {
+    matches!(
+        msg.text(),
+        Some(
+            "📄 Моє резюме"
+                | "⚙️ Фільтри мов"
+                | "📁 Збережені вакансії"
+                | "📋 Мої відгуки"
+                | "🚫 Чорний список"
+                | "📬 Пошта та офери"
+                | "ℹ️ Довідка"
+        )
+    )
+}
+
 pub fn schema() -> UpdateHandler<Box<dyn std::error::Error + Send + Sync + 'static>> {
     use dptree::case;
 
@@ -35,6 +50,7 @@ pub fn schema() -> UpdateHandler<Box<dyn std::error::Error + Send + Sync + 'stat
     let message_handler = Update::filter_message()
         .enter_dialogue::<Message, ErasedStorage<State>, State>()
         .branch(command_handler)
+        .branch(dptree::filter(is_menu_button).endpoint(handle_text_menu))
         .branch(case![State::Start].endpoint(handle_text_menu))
         .branch(case![State::WaitingForCvDocument].endpoint(handle_cv_upload))
         .branch(case![State::WaitingForEmailSetup].endpoint(handle_email_input))
@@ -169,11 +185,12 @@ async fn handle_cv_command(
 async fn handle_filters_command(
     bot: Bot,
     msg: Message,
-    _dialogue: MyDialogue,
+    dialogue: MyDialogue,
     db: Db,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let user_id = msg.from.as_ref().map(|u| u.id.0 as i64).unwrap_or(0);
     let user = db.get_or_create_user(user_id).await?;
+    dialogue.update(State::Start).await?;
 
     let text = "⚙️ <b>Пошукові фільтри за мовами:</b>\n\n\
                 Оберіть, які сповіщення про вакансії ви хочете отримувати:";
@@ -203,10 +220,11 @@ async fn handle_filters_command(
 async fn handle_applied_command(
     bot: Bot,
     msg: Message,
-    _dialogue: MyDialogue,
+    dialogue: MyDialogue,
     db: Db,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let user_id = msg.from.as_ref().map(|u| u.id.0 as i64).unwrap_or(0);
+    dialogue.update(State::Start).await?;
     let apps = db.get_user_applications(user_id).await?;
 
     if apps.is_empty() {
@@ -238,7 +256,7 @@ async fn handle_applied_command(
             "🏢 <b>{}</b> — <a href=\"{}\">{}</a>\n\
              Статус: <b>{}</b> | Дата: <i>{}</i>\n\n",
             html_escape(&vac.company),
-            vac.url,
+            html_escape(&vac.url),
             html_escape(&vac.title),
             status_emoji,
             date_str
@@ -287,7 +305,7 @@ async fn handle_blacklist_command(
     let mut buttons = Vec::new();
 
     for item in items.iter().take(10) {
-        let cb = format!("unbl:{}", item.company_name);
+        let cb = format!("unbl:{}", truncate_str(&item.company_name, 50));
         buttons.push(vec![InlineKeyboardButton::callback(
             format!("❌ Видалити: {}", item.company_name),
             cb,
@@ -368,7 +386,9 @@ async fn handle_cancel_command(
 async fn handle_help_command(
     bot: Bot,
     msg: Message,
+    dialogue: MyDialogue,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    dialogue.update(State::Start).await?;
     let text = "ℹ️ <b>Job Notifier Bot — Довідка:</b>\n\n\
          🔹 <b>Моніторинг:</b> Кожні 10 хвилин бот сканує Djinni, DOU та LinkedIn за ключовими словами Rust та Go.\n\
          🔹 <b>Резюме:</b> Завантажте CV через кнопку «Моє резюме» або команду /cv. При відгуку на вакансію воно автоматично відправляється/фіксується.\n\
@@ -416,8 +436,8 @@ fn build_vacancies_view(
     let start_idx = (current_page - 1) * VACANCIES_PAGE_SIZE;
     for (i, vac) in vacancies.iter().enumerate() {
         let tag = match vac.keyword.as_str() {
-            "Rust" => "🦀 Rust",
-            "Go" => "🐹 Go",
+            "rust" | "Rust" => "🦀 Rust",
+            "go" | "Go" => "🐹 Go",
             _ => vac.keyword.as_str(),
         };
 
@@ -440,7 +460,7 @@ fn build_vacancies_view(
             tag,
             salary_part,
             date_str,
-            vac.url
+            html_escape(&vac.url)
         ));
     }
 
@@ -507,9 +527,10 @@ fn build_vacancies_view(
 async fn handle_vacancies_command(
     bot: Bot,
     msg: Message,
-    _dialogue: MyDialogue,
+    dialogue: MyDialogue,
     db: Db,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    dialogue.update(State::Start).await?;
     let (vacancies, total_count) = db
         .get_vacancies_paginated(None, 1, VACANCIES_PAGE_SIZE)
         .await?;
@@ -550,7 +571,7 @@ async fn handle_text_menu(
         "📋 Мої відгуки" => handle_applied_command(bot, msg, dialogue, db).await,
         "🚫 Чорний список" => handle_blacklist_command(bot, msg, dialogue, db).await,
         "📬 Пошта та офери" => handle_email_command(bot, msg, dialogue, db).await,
-        "ℹ️ Довідка" => handle_help_command(bot, msg).await,
+        "ℹ️ Довідка" => handle_help_command(bot, msg, dialogue).await,
         _ => {
             // Check if document was uploaded directly without command
             if msg.document().is_some() {
@@ -592,23 +613,27 @@ async fn handle_cv_upload(
 
     let file_name = doc
         .file_name
-        .clone()
+        .as_deref()
+        .and_then(|n| Path::new(n).file_name())
+        .and_then(|n| n.to_str())
+        .filter(|n| !n.is_empty())
+        .map(str::to_string)
         .unwrap_or_else(|| format!("cv_{}.pdf", user_id));
-
-    let user_existing = db.get_user(user_id).await?;
-    if let Some(old_path) = user_existing
-        .and_then(|u| u.cv_file_path)
-        .filter(|p| Path::new(p).exists())
-    {
-        let _ = tokio::fs::remove_file(&old_path).await;
-        info!("Deleted old CV file: {}", old_path);
-    }
 
     let save_path = format!("{}/{}_{}", RESUMES_STORAGE_DIR, user_id, file_name);
 
     let tg_file = bot.get_file(doc.file.id.clone()).await?;
     let mut dst = File::create(&save_path).await?;
     bot.download_file(&tg_file.path, &mut dst).await?;
+
+    let user_existing = db.get_user(user_id).await?;
+    if let Some(old_path) = user_existing
+        .and_then(|u| u.cv_file_path)
+        .filter(|p| p != &save_path && Path::new(p).exists())
+    {
+        let _ = tokio::fs::remove_file(&old_path).await;
+        info!("Deleted old CV file: {}", old_path);
+    }
 
     db.update_user_cv(user_id, &save_path, &file_name).await?;
     dialogue.update(State::Start).await?;
@@ -714,7 +739,7 @@ async fn handle_email_reply_input(
     let user_id = msg.from.as_ref().map(|u| u.id.0 as i64).unwrap_or(0);
     let text = msg.text().unwrap_or_default().trim();
 
-    if text.starts_with('/') {
+    if text.is_empty() || text.starts_with('/') {
         return Ok(());
     }
 
@@ -765,7 +790,7 @@ async fn handle_blacklist_input(
     let user_id = msg.from.as_ref().map(|u| u.id.0 as i64).unwrap_or(0);
     let company_name = msg.text().unwrap_or_default().trim();
 
-    if company_name.starts_with('/') {
+    if company_name.is_empty() || company_name.starts_with('/') {
         return Ok(());
     }
 
@@ -1131,7 +1156,8 @@ async fn trigger_immediate_search_and_send(
 
     // 1. Djinni
     if let Ok(vacancies) = djinni.fetch_vacancies(keyword).await {
-        for vac in vacancies.iter().take(5) {
+        let mut platform_sent = 0;
+        for vac in &vacancies {
             let new_vac = crate::services::storage::models::NewVacancy {
                 id: &vac.id,
                 platform: crate::services::storage::models::Platform::Djinni.as_str(),
@@ -1144,11 +1170,13 @@ async fn trigger_immediate_search_and_send(
                 url: &vac.url,
             };
             let _ = db.save_vacancy(new_vac).await;
-            if let Ok(true) = crate::services::djinni::service::send_djinni_vacancy_to_user(
-                &db, &bot, user_id, vac,
-            )
-            .await
+            if platform_sent < 5
+                && let Ok(true) = crate::services::djinni::service::send_djinni_vacancy_to_user(
+                    &db, &bot, user_id, vac,
+                )
+                .await
             {
+                platform_sent += 1;
                 sent_count += 1;
             }
         }
@@ -1156,7 +1184,8 @@ async fn trigger_immediate_search_and_send(
 
     // 2. DOU
     if let Ok(vacancies) = dou.fetch_vacancies(keyword).await {
-        for vac in vacancies.iter().take(5) {
+        let mut platform_sent = 0;
+        for vac in &vacancies {
             let new_vac = crate::services::storage::models::NewVacancy {
                 id: &vac.id,
                 platform: crate::services::storage::models::Platform::Dou.as_str(),
@@ -1169,10 +1198,12 @@ async fn trigger_immediate_search_and_send(
                 url: &vac.url,
             };
             let _ = db.save_vacancy(new_vac).await;
-            if let Ok(true) =
-                crate::services::dou::service::send_dou_vacancy_to_user(&db, &bot, user_id, vac)
-                    .await
+            if platform_sent < 5
+                && let Ok(true) =
+                    crate::services::dou::service::send_dou_vacancy_to_user(&db, &bot, user_id, vac)
+                        .await
             {
+                platform_sent += 1;
                 sent_count += 1;
             }
         }
@@ -1180,7 +1211,8 @@ async fn trigger_immediate_search_and_send(
 
     // 3. LinkedIn
     if let Ok(vacancies) = linkedin.fetch_vacancies(keyword).await {
-        for vac in vacancies.iter().take(5) {
+        let mut platform_sent = 0;
+        for vac in &vacancies {
             let new_vac = crate::services::storage::models::NewVacancy {
                 id: &vac.id,
                 platform: crate::services::storage::models::Platform::LinkedIn.as_str(),
@@ -1193,11 +1225,13 @@ async fn trigger_immediate_search_and_send(
                 url: &vac.url,
             };
             let _ = db.save_vacancy(new_vac).await;
-            if let Ok(true) = crate::services::linkedin::service::send_linkedin_vacancy_to_user(
-                &db, &bot, user_id, vac,
-            )
-            .await
+            if platform_sent < 5
+                && let Ok(true) = crate::services::linkedin::service::send_linkedin_vacancy_to_user(
+                    &db, &bot, user_id, vac,
+                )
+                .await
             {
+                platform_sent += 1;
                 sent_count += 1;
             }
         }
